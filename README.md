@@ -19,7 +19,8 @@ LiteLoaderQQNT 本体：[LiteLoaderQQNT](https://github.com/mo-jinran/LiteLoader
 > **不要在 QQ 官方群聊发送*任何*可以看出你使用了第三方插件的截图**
 
 > [!Warning]\
-> 该插件进入缓慢维护状态，无法保证所有功能在最新版 QQNT 下的可用性，以及 Bug 的修复时间将被大幅延长。
+> **请注意** 由于长时间未更新，该插件已无法在最新版本的 QQNT 上运行，根据此 [Issue](https://github.com/xiyuesaves/LiteLoaderQQNT-lite_tools/issues/379#issuecomment-2708869340) 中的描述，还能正常使用的构建版本号为 ```29804```\
+> ~~该插件进入缓慢维护状态，无法保证所有功能在最新版 QQNT 下的可用性，以及 Bug 的修复时间将被大幅延长。~~
 
 > [!NOTE]\
 > 该插件在 Windows 环境下测试开发，理论全平台兼容，但没有条件对 Mac 和 Linux 平台进行测试
