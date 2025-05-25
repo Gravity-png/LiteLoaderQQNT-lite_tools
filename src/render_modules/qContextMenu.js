@@ -9,8 +9,349 @@ import { Logs } from "./logs.js";
 import { createSticker } from "./createSticker.js";
 const log = new Logs("右键菜单");
 
+// 全局定时器存储
+const subMenuTimers = new Map();
+
 /**
- * 右键菜单插入功能方法
+ * 找出所有路径的公共前缀
+ * @param {Array} paths - 路径数组
+ * @returns {String} 公共前缀
+ */
+function findCommonPrefix(paths) {
+  if (!paths.length) return "";
+
+  // 将所有路径按 \ 分割
+  const splitPaths = paths.map((p) => p.split("\\").filter(Boolean));
+
+  // 找出最短路径的长度
+  const minLength = Math.min(...splitPaths.map((p) => p.length));
+
+  let commonPrefix = [];
+
+  // 逐级比较
+  for (let i = 0; i < minLength; i++) {
+    const currentPart = splitPaths[0][i];
+
+    // 检查所有路径在这一级是否相同
+    if (splitPaths.every((p) => p[i] === currentPart)) {
+      commonPrefix.push(currentPart);
+    } else {
+      break;
+    }
+  }
+
+  return commonPrefix.join("\\");
+}
+
+/**
+ * 将平铺的文件夹列表转换为树形结构
+ * @param {Array} flatList - 平铺的文件夹列表
+ * @returns {Array} 树形结构的文件夹列表
+ */
+function buildFolderTree(flatList) {
+  const tree = [];
+  const map = new Map();
+
+  // 先按路径排序，确保父目录在子目录之前
+  const sortedList = [...flatList].sort((a, b) => a.path.localeCompare(b.path, "en", { sensitivity: "base" }));
+
+  // 找出公共前缀并移除
+  const commonPrefix = findCommonPrefix(sortedList.map((item) => item.path));
+  const prefixLength = commonPrefix ? commonPrefix.length + 1 : 0; // +1 是为了去掉分隔符
+
+  // 创建所有节点的映射，同时去除公共前缀
+  sortedList.forEach((item) => {
+    const adjustedPath = item.path.substring(prefixLength);
+    map.set(adjustedPath, {
+      name: item.name,
+      path: item.path, // 保留原始路径用于保存
+      adjustedPath: adjustedPath, // 调整后的路径用于构建树
+      children: [],
+    });
+  });
+
+  // 构建树形结构
+  sortedList.forEach((item) => {
+    const adjustedPath = item.path.substring(prefixLength);
+    const parts = adjustedPath.split("\\").filter(Boolean);
+
+    if (parts.length === 1) {
+      // 根级目录
+      tree.push(map.get(adjustedPath));
+    } else {
+      // 子目录，需要找到其父目录
+      const parentPath = parts.slice(0, -1).join("\\");
+      const parent = map.get(parentPath);
+
+      if (parent) {
+        parent.children.push(map.get(adjustedPath));
+      } else {
+        // 如果父目录不存在于列表中，创建一个虚拟父目录
+        const virtualParentName = parts[parts.length - 2];
+        const virtualParent = {
+          name: virtualParentName,
+          path: (commonPrefix ? commonPrefix + "\\" : "") + parentPath, // 恢复完整路径
+          adjustedPath: parentPath,
+          children: [map.get(adjustedPath)],
+          virtual: true,
+        };
+        map.set(parentPath, virtualParent);
+
+        // 递归向上查找或创建父目录
+        if (parts.length > 2) {
+          const grandParentPath = parts.slice(0, -2).join("\\");
+          const grandParent = map.get(grandParentPath);
+          if (grandParent) {
+            grandParent.children.push(virtualParent);
+          } else {
+            tree.push(virtualParent);
+          }
+        } else {
+          tree.push(virtualParent);
+        }
+      }
+    }
+  });
+
+  return tree;
+}
+
+/**
+ * 创建多级子菜单
+ * @param {Element} parentEl - 父元素
+ * @param {Array} menuItems - 菜单项数组
+ * @param {Function} callback - 回调函数
+ * @param {number} level - 菜单层级
+ */
+function createNestedSubMenu(parentEl, menuItems, callback, level = 0) {
+  const subMenuEl = document.createElement("div");
+  const scrollEl = document.createElement("div");
+
+  scrollEl.classList.add("lite-tools-scroll-box");
+  subMenuEl.appendChild(scrollEl);
+  subMenuEl.classList.add("lite-tools-sub-context-menu", `level-${level}`);
+
+  // 为子菜单添加唯一标识
+  const menuId = `submenu-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  subMenuEl.setAttribute("data-menu-id", menuId);
+  parentEl.setAttribute("data-submenu-id", menuId);
+
+  // 初始化坐标
+  subMenuEl.style.setProperty("--top", `0vh`);
+  subMenuEl.style.setProperty("--left", `0vh`);
+  subMenuEl.style.setProperty("--height", `0px`);
+  subMenuEl.style.setProperty("--width", `0px`);
+
+  // 清除该菜单的所有相关定时器
+  const clearMenuTimer = (id) => {
+    const timer = subMenuTimers.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      subMenuTimers.delete(id);
+    }
+  };
+
+  // 设置关闭定时器
+  const setCloseTimer = (id, element) => {
+    clearMenuTimer(id);
+    const timer = setTimeout(() => {
+      element.classList.remove("show");
+      // 递归关闭所有子菜单
+      element.querySelectorAll(".lite-tools-sub-context-menu").forEach((child) => {
+        child.classList.remove("show");
+      });
+    }, 300);
+    subMenuTimers.set(id, timer);
+  };
+
+  // 子菜单的鼠标事件
+  subMenuEl.addEventListener("mouseenter", () => {
+    // 清除自己的关闭定时器
+    clearMenuTimer(menuId);
+
+    // 确保显示状态
+    subMenuEl.classList.add("show");
+
+    // 递归清除所有父级菜单的定时器并保持显示
+    let currentEl = parentEl;
+    while (currentEl) {
+      // 清除当前元素对应的子菜单定时器
+      const currentSubmenuId = currentEl.getAttribute("data-submenu-id");
+      if (currentSubmenuId) {
+        clearMenuTimer(currentSubmenuId);
+        const currentSubmenu = document.querySelector(`[data-menu-id="${currentSubmenuId}"]`);
+        if (currentSubmenu) {
+          currentSubmenu.classList.add("show");
+        }
+      }
+
+      // 如果当前元素是子菜单项，继续查找其父级子菜单
+      if (currentEl.classList.contains("sub-context-menu-item")) {
+        // 获取包含当前元素的子菜单容器
+        const parentSubmenu = currentEl.closest(".lite-tools-sub-context-menu");
+        if (parentSubmenu) {
+          const parentSubmenuId = parentSubmenu.getAttribute("data-menu-id");
+          if (parentSubmenuId) {
+            clearMenuTimer(parentSubmenuId);
+            parentSubmenu.classList.add("show");
+          }
+          // 查找触发这个子菜单的父元素
+          currentEl = document.querySelector(`[data-submenu-id="${parentSubmenuId}"]`);
+        } else {
+          currentEl = null;
+        }
+      } else {
+        currentEl = null;
+      }
+    }
+  });
+
+  subMenuEl.addEventListener("mouseleave", (event) => {
+    // 检查鼠标是否移动到了父元素或子元素
+    const relatedTarget = event.relatedTarget;
+
+    // 如果移动到父元素，不关闭
+    if (relatedTarget && parentEl.contains(relatedTarget)) {
+      return;
+    }
+
+    // 检查是否移动到了子菜单
+    const childMenus = subMenuEl.querySelectorAll(".lite-tools-sub-context-menu");
+    for (let childMenu of childMenus) {
+      if (relatedTarget && childMenu.contains(relatedTarget)) {
+        return;
+      }
+    }
+
+    // 设置关闭定时器
+    setCloseTimer(menuId, subMenuEl);
+  });
+
+  // 处理滚轮事件
+  subMenuEl.addEventListener("wheel", (event) => {
+    event.stopPropagation();
+    const maxTop = scrollEl.offsetHeight - subMenuEl.offsetHeight + 8;
+    if (maxTop < 10) {
+      return;
+    }
+    let addValue = 30;
+    if (event.deltaY > 0) {
+      addValue = -30;
+    }
+    let offsetY = (parseFloat(scrollEl.style.transform.split("translateY(")[1]) || 0) + addValue;
+    if (offsetY > 0) {
+      offsetY = 0;
+    }
+    if (offsetY < -maxTop) {
+      offsetY = -maxTop;
+    }
+    scrollEl.style.transform = `translateY(${offsetY}px)`;
+  });
+
+  menuItems.forEach((menuData) => {
+    const subMenuItemEl = document.createElement("div");
+    subMenuItemEl.classList.add("sub-context-menu-item");
+
+    // 创建文本节点和容器，确保文字和箭头在同一行
+    const textSpan = document.createElement("span");
+    textSpan.textContent = menuData.name;
+    textSpan.style.flexGrow = "1";
+    subMenuItemEl.appendChild(textSpan);
+
+    subMenuItemEl.menuData = menuData;
+
+    // 如果有子项，添加子菜单图标和处理逻辑
+    if (menuData.children && menuData.children.length > 0) {
+      subMenuItemEl.classList.add("has-submenu");
+      subMenuItemEl.style.display = "flex";
+      subMenuItemEl.style.alignItems = "center";
+      subMenuItemEl.style.justifyContent = "space-between";
+
+      // 创建箭头容器
+      const arrowSpan = document.createElement("span");
+      arrowSpan.innerHTML = subMenuIconEl;
+      arrowSpan.style.flexShrink = "0";
+      arrowSpan.style.marginLeft = "8px";
+      subMenuItemEl.appendChild(arrowSpan);
+
+      // 递归创建子菜单
+      const childSubMenu = createNestedSubMenu(subMenuItemEl, menuData.children, callback, level + 1);
+
+      subMenuItemEl.addEventListener("mouseenter", (event) => {
+        const childMenuId = subMenuItemEl.getAttribute("data-submenu-id");
+        // 清除子菜单的关闭定时器
+        clearMenuTimer(childMenuId);
+
+        const rect = event.currentTarget.getBoundingClientRect();
+        childSubMenu.classList.add("show");
+        childSubMenu.style.setProperty("--top", `${rect.y}px`);
+        childSubMenu.style.setProperty("--left", `${rect.x + rect.width}px`);
+        childSubMenu.style.setProperty("--height", `${childSubMenu.offsetHeight}px`);
+        childSubMenu.style.setProperty("--width", `${childSubMenu.offsetWidth}px`);
+      });
+
+      subMenuItemEl.addEventListener("mouseleave", (event) => {
+        // 检查鼠标是否移动到了子菜单
+        const relatedTarget = event.relatedTarget;
+        const childMenuId = subMenuItemEl.getAttribute("data-submenu-id");
+        const childMenu = document.querySelector(`[data-menu-id="${childMenuId}"]`);
+
+        if (relatedTarget && childMenu && childMenu.contains(relatedTarget)) {
+          return; // 如果移动到子菜单，不关闭
+        }
+
+        // 设置子菜单的关闭定时器
+        if (childMenu) {
+          setCloseTimer(childMenuId, childMenu);
+        }
+      });
+    }
+
+    // 点击事件 - 无论是否有子菜单都可以点击
+    subMenuItemEl.addEventListener("click", (event) => {
+      event.stopPropagation();
+      callback(event, menuData);
+      // 清除所有定时器
+      subMenuTimers.clear();
+      // 关闭所有菜单
+      document.querySelectorAll(".lite-tools-sub-context-menu").forEach((el) => el.remove());
+      document.querySelector(".q-context-menu")?.remove();
+    });
+
+    scrollEl.appendChild(subMenuItemEl);
+  });
+
+  // 父元素的鼠标事件
+  parentEl.addEventListener("mouseenter", (event) => {
+    clearMenuTimer(menuId);
+    const rect = event.currentTarget.getBoundingClientRect();
+    subMenuEl.classList.add("show");
+    subMenuEl.style.setProperty("--top", `${rect.y}px`);
+    subMenuEl.style.setProperty("--left", `${rect.x + rect.width}px`);
+    subMenuEl.style.setProperty("--height", `${subMenuEl.offsetHeight}px`);
+    subMenuEl.style.setProperty("--width", `${subMenuEl.offsetWidth}px`);
+  });
+
+  parentEl.addEventListener("mouseleave", (event) => {
+    // 检查鼠标是否移动到了子菜单
+    const relatedTarget = event.relatedTarget;
+    const submenuId = parentEl.getAttribute("data-submenu-id");
+    const submenu = document.querySelector(`[data-menu-id="${submenuId}"]`);
+
+    if (relatedTarget && submenu && submenu.contains(relatedTarget)) {
+      return; // 如果移动到子菜单，不关闭
+    }
+
+    setCloseTimer(menuId, subMenuEl);
+  });
+
+  document.body.appendChild(subMenuEl);
+
+  return subMenuEl;
+}
+
+/**
+ * 右键菜单插入功能方法 - 改造版
  * @param {Element} qContextMenu - 右键菜单元素
  * @param {String} icon - SVG字符串
  * @param {String} title - 选项显示名称
@@ -19,6 +360,8 @@ const log = new Logs("右键菜单");
 function addQContextMenu(qContextMenu, icon, title, ...args) {
   let callback;
   let subMenu;
+  let allowMainClick = false; // 新增参数，控制主菜单是否可点击
+
   if (args[0] instanceof Function) {
     callback = args[0];
   }
@@ -28,6 +371,10 @@ function addQContextMenu(qContextMenu, icon, title, ...args) {
   if (args[1] instanceof Function) {
     callback = args[1];
   }
+  if (args[2] === true) {
+    allowMainClick = true; // 如果第三个参数为 true，则允许主菜单点击
+  }
+
   if (
     !document.querySelector(`.q-context-menu>:not(.menu-stickers-wrapper,[disabled="true"])`) &&
     !document.querySelector(`.q-context-menu-item:not([disabled="true"])`)
@@ -48,69 +395,10 @@ function addQContextMenu(qContextMenu, icon, title, ...args) {
   contextItem?.style?.removeProperty("color");
   if (subMenu && subMenu.length && contextItem.querySelector(".q-context-menu-item__text")) {
     contextItem.insertAdjacentHTML("beforeend", subMenuIconEl);
-    const subMenuEl = document.createElement("div");
-    const scrollEl = document.createElement("div");
-    let closeSubMenuTimeout;
-    scrollEl.classList.add("lite-tools-scroll-box");
-    subMenuEl.appendChild(scrollEl);
-    subMenuEl.classList.add("lite-tools-sub-context-menu");
-    // 初始化坐标
-    subMenuEl.style.setProperty("--top", `0vh`);
-    subMenuEl.style.setProperty("--left", `0vh`);
-    subMenuEl.style.setProperty("--height", `0px`);
-    subMenuEl.style.setProperty("--width", `0px`);
-    subMenuEl.addEventListener("mouseenter", () => {
-      clearTimeout(closeSubMenuTimeout);
-      subMenuEl.classList.add("show");
-    });
-    subMenuEl.addEventListener("mouseleave", () => {
-      closeSubMenuTimeout = setTimeout(() => {
-        subMenuEl.classList.remove("show");
-      }, 300);
-    });
-    subMenuEl.addEventListener("click", (event) => {
-      callback(event, event.target.menuData);
-    });
-    subMenuEl.addEventListener("wheel", (event) => {
-      const maxTop = scrollEl.offsetHeight - subMenuEl.offsetHeight + 8;
-      if (maxTop < 10) {
-        return;
-      }
-      let addValue = 30;
-      if (event.deltaY > 0) {
-        addValue = -30;
-      }
-      let offsetY = (parseFloat(scrollEl.style.transform.split("translateY(")[1]) || 0) + addValue;
-      if (offsetY > 0) {
-        offsetY = 0;
-      }
-      if (offsetY < -maxTop) {
-        offsetY = -maxTop;
-      }
-      scrollEl.style.transform = `translateY(${offsetY}px)`;
-    });
-    subMenu.forEach((menuData) => {
-      const subMenuItemEl = document.createElement("div");
-      subMenuItemEl.classList.add("sub-context-menu-item");
-      subMenuItemEl.innerText = menuData.name;
-      subMenuItemEl.menuData = menuData;
-      scrollEl.appendChild(subMenuItemEl);
-    });
-    contextItem.addEventListener("mouseenter", (event) => {
-      clearTimeout(closeSubMenuTimeout);
-      const rect = event.target.getBoundingClientRect();
-      subMenuEl.classList.add("show");
-      subMenuEl.style.setProperty("--top", `calc(${rect.y}px - 0vh)`);
-      subMenuEl.style.setProperty("--left", `calc(${rect.x + rect.width}px - 0vh)`);
-      subMenuEl.style.setProperty("--height", `${subMenuEl.offsetHeight}px`);
-      subMenuEl.style.setProperty("--width", `${subMenuEl.offsetWidth}px`);
-    });
-    contextItem.addEventListener("mouseleave", () => {
-      closeSubMenuTimeout = setTimeout(() => {
-        subMenuEl.classList.remove("show");
-      }, 300);
-    });
-    document.body.appendChild(subMenuEl);
+
+    // 使用新的嵌套菜单创建函数
+    const nestedTree = buildFolderTree(subMenu);
+    createNestedSubMenu(contextItem, nestedTree, callback, 0);
   }
   if (contextItem.querySelector(".q-icon")) {
     contextItem.querySelector(".q-icon").innerHTML = icon;
@@ -120,10 +408,13 @@ function addQContextMenu(qContextMenu, icon, title, ...args) {
   } else {
     contextItem.querySelector(".q-context-menu-item__text").innerText = title;
   }
-  // 有子菜单时不添加主菜单的点击事件
-  if (callback && !subMenu) {
+
+  // 修改点击事件逻辑 - 如果允许主菜单点击或没有子菜单，则添加点击事件
+  if (callback && (!subMenu || allowMainClick)) {
     contextItem.addEventListener("click", () => {
       callback();
+      // 清除所有定时器
+      subMenuTimers.clear();
       qContextMenu.remove();
     });
   }
@@ -248,6 +539,8 @@ function addEventqContextMenu() {
     const qContextMenu = document.querySelector(".q-context-menu:not(.lite-toos-context-menu)");
     if (!qContextMenu) {
       if (!document.querySelector(".q-context-menu")) {
+        // 清理所有定时器
+        subMenuTimers.clear();
         document.querySelectorAll(".lite-tools-sub-context-menu").forEach((el) => el.remove());
       }
       return;
@@ -305,29 +598,31 @@ function addEventqContextMenu() {
         lite_tools.openWeb(openUrl);
       });
     }
-    // 保存到本地表情文件夹
+    // 保存到本地表情文件夹 - 改造后支持多级嵌套
     log("图片地址", imagePath);
     if (imagePath && options.localEmoticons.enabled && options.localEmoticons.copyFileTolocalEmoticons) {
       const _imagePath = imagePath;
       const subMenuList = emoticonsList.map(({ name, path }) => ({ name, path }));
       addQContextMenu(qContextMenu, localEmoticonsIcon, "保存到本地表情", subMenuList, async (event, data) => {
-        const filePathArr = _imagePath.replace(/\\/g, "/").split("/");
-        const filePath = `${data.path}\\${filePathArr[filePathArr.length - 1]}`.replace(/\\/g, "/");
-        if (_imagePath.startsWith("qqface:")) {
-          const rawPath = _imagePath.split("qqface:")[1];
-          if (await lite_tools.copyFile(rawPath + "_aio.png", filePath + "_aio.png")) {
+          const filePathArr = _imagePath.replace(/\\/g, "/").split("/");
+          const filePath = `${data.path}\\${filePathArr[filePathArr.length - 1]}`.replace(/\\/g, "/");
+          if (_imagePath.startsWith("qqface:")) {
+            const rawPath = _imagePath.split("qqface:")[1];
+            if (await lite_tools.copyFile(rawPath + "_aio.png", filePath + "_aio.png")) {
+              showToast("保存成功", "success", 3000);
+            } else if (await lite_tools.copyFile(rawPath + "_thu.png", filePath + "_thu.png")) {
+              showToast("保存成功", "success", 3000);
+            } else if (!(await lite_tools.copyFile(rawPath, filePath + ".png"))) {
+              showToast("保存失败", "error", 3000);
+            }
+          } else if (await lite_tools.copyFile(_imagePath, filePath)) {
             showToast("保存成功", "success", 3000);
-          } else if (await lite_tools.copyFile(rawPath + "_thu.png", filePath + "_thu.png")) {
-            showToast("保存成功", "success", 3000);
-          } else if (!(await lite_tools.copyFile(rawPath, filePath + ".png"))) {
+          } else {
             showToast("保存失败", "error", 3000);
           }
-        } else if (await lite_tools.copyFile(_imagePath, filePath)) {
-          showToast("保存成功", "success", 3000);
-        } else {
-          showToast("保存失败", "error", 3000);
-        }
-      });
+        },
+        true,// 修改：添加第三个参数 true，表示允许主菜单点击
+      );
     }
     // 消息转图片
     if (options.qContextMenu.messageToImage.enabled && msgSticker) {
